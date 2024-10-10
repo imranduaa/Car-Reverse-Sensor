@@ -1,0 +1,176 @@
+/*
+ * LabProject_main.c
+ *
+ *  Created on: Apr 7, 2024
+ *      Author: bijoy & Pena
+ */
+
+
+#include <stdint.h>
+#include <stdbool.h>
+#include <math.h>
+#include <inc/hw_memmap.h>
+#include <inc/hw_ints.h>
+#include <driverlib/pin_map.h>
+#include <driverlib/sysctl.h>
+#include <driverlib/gpio.h>
+#include <driverlib/interrupt.h>
+#include "launchpad.h"
+#include "ranger.h"
+#include "seg7.h"
+#include "music.h"
+#include "pwm_buzzer.h"
+
+
+//buzz-noise
+#define BUZZER_PERIOD_VALUE 50000  // Example period value (adjust as needed)
+#define BUZZER_WIDTH_VALUE 25000   // Example width value (adjust as needed)
+
+//volume
+#define NUM_VOLUME_LEVEL    3
+#define VOLUME_HIGH_DISTANCE_THRESHOLD 10 // Adjust this threshold as needed
+
+#define CPU_CLOCK_RATE      50000000
+#define NUM_PITCH           7
+#define NUM_VOLUME_LEVEL    3
+
+// Events in the system
+Event play_sound_event;
+Event trigger_ranger_reading_event;
+Event clock_update_event;
+// System state
+typedef struct
+{
+    int pitch;            // Current pitch level
+    int volume;           // Current sound level
+    bool buzzer_on;             // If buzzer is turned on or off
+} SysState;
+
+SysState sys = { 0, 0, false };
+
+// Frequency values for notes
+static int buzzerNoises[NUM_PITCH] = {261.63, 293.66, 329.63, 349.23, 392.00, 440.00, 493.88};
+
+//Settings for Volume: Low, Medium, and High. These are based on the desire duty cycles/pulse Widths
+static int buzzerVolumes[NUM_VOLUME_LEVEL] = {1000, 2500, 20000};
+
+static SysState sys_state = { 0, 0, false };
+
+Seg7Display seg7 = { { 10, 10, 10, 10 }, false /* colon on */};
+
+
+
+/*******************************************
+ * Task 1: Trigger and read the ranger
+ ******************************************/
+
+// Trigger the ranger reading every 0.5 seconds
+void TriggerRangerReading(Event *event)
+{
+    RangerTriggerReading();
+    uint32_t width = RangerGetData();
+    uprintf("Sensor reading: %u \r\n", (uint32_t)width);
+    uint32_t distance;
+    distance = width * 12 / 89657;
+    uint32_t feet = distance / 12;
+    uint32_t inches = distance % 12;
+   // Set feet
+        if (feet >= 10){
+            seg7.digit[3] = feet / 10;
+            seg7.digit[2] = feet % 10;
+        }
+        else if (feet > 0){
+            seg7.digit[3] = 11; // Display 'E' for excess feet
+            seg7.digit[2] = feet;
+        }
+        else if (feet == 0){
+            seg7.digit[3] = 0; // Display '0' for zero feet
+            seg7.digit[2] = 0; // Display '0' for zero feet
+        }
+
+     // Set inches
+        if (inches < 10 && feet != 0) {
+            seg7.digit[1] = 0;
+        }
+        else{
+            seg7.digit[1] = inches / 10;
+        }
+        if ((inches < 10) && (feet == 0)){
+            seg7.digit[1] = 11; // Display 'E' for excess inches
+        }
+        seg7.digit[0] = inches % 10;
+
+    // Adjust volume based on distance
+           if (distance <= VOLUME_HIGH_DISTANCE_THRESHOLD) {
+               sys_state.volume = NUM_VOLUME_LEVEL - 1; // Set volume to maximum level
+           } else {
+               // Set volume based on distance
+               // (You can implement more sophisticated volume adjustments here)
+               sys_state.volume = NUM_VOLUME_LEVEL - 2; // Example: set to medium level
+           }
+
+
+    // Turn on LED if distance is less than or equal to 20 inches
+        if (distance <= 20) {
+             // Turn on green LED
+          GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_1 | GPIO_PIN_2 | GPIO_PIN_3, GPIO_PIN_3);
+
+          // Sound the buzzer
+         // PwmBuzzerset(BUZZER_PERIOD_VALUE, BUZZER_WIDTH_VALUE); // Provide appropriate values here
+       //   PwmBuzzerset(CPU_CLOCK_RATE / buzzerNoises[sys_state.pitch], buzzerVolumes[sys_state.volume]);
+          PwmBuzzerset(CPU_CLOCK_RATE/493.88, 1000);
+
+            } else {
+
+                // Turn off LED
+          GPIOPinWrite(GPIO_PORTF_BASE, GPIO_PIN_1 | GPIO_PIN_2 | GPIO_PIN_3, 0);
+          // Sound the buzzer with adjusted volume
+         PwmBuzzerset(CPU_CLOCK_RATE / buzzerNoises[sys_state.pitch], buzzerVolumes[sys_state.volume]);
+         // PwmBuzzerset(CPU_CLOCK_RATE/buzzerNoises[sys.pitch], 500);
+
+         //[NUM_PITCH] = {261.63, 293.66, 329.63, 349.23, 392.00, 440.00, 493.88};
+
+        //distance-sounds
+         if ( feet >= 4 && feet < 5 ) {
+         PwmBuzzerset(CPU_CLOCK_RATE / 261.63, 1000);
+}
+         else if ( feet <= 3 && feet < 4) {
+              PwmBuzzerset(CPU_CLOCK_RATE / 329.63, 1000);
+}
+         else if ( feet <= 2 && feet < 3) {
+                      PwmBuzzerset(CPU_CLOCK_RATE / 392.00, 1000);
+}
+         else if ( distance >= 21 && distance < 24) {
+                      PwmBuzzerset(CPU_CLOCK_RATE / 493.88, 1000);
+                 }
+}
+    Seg7Update(&seg7);
+    EventSchedule(event, event->time + 500);
+}
+
+void main(void)
+{
+    // Initialize the LaunchPad and peripherals
+    LaunchPadInit();
+    RangerInit();
+    Seg7Init();
+    PwmBuzzerInit();
+    // Initialize the events
+    EventInit(&trigger_ranger_reading_event, TriggerRangerReading);
+    RangerEventRegister(&trigger_ranger_reading_event);
+
+    // Schedule time event
+    EventSchedule(&trigger_ranger_reading_event, 100);
+
+    // Print out a message. See uprintf() in launchpad.h
+    uprintf("%s\n\r", "Lab Project: Car Reversing Sensor");
+    // Loop forever
+    while (true)
+    {
+    // Wait for interrupt
+       asm("   wfi");
+
+    // Execute scheduled callbacks
+       EventExecute();
+    }
+}
